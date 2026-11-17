@@ -77,5 +77,6 @@ SERIES = {
     "ingresos_gobierno_central": "F051.BT02.FLU.C.D.CLP.M",   # Gobierno central total, ingresos devengado (millones $)
     "gasto_gobierno_central": "F051.BT03.FLU.C.D.CLP.M",      # Gobierno central total, gastos devengado (millones $)
     "eee_pib_2027": "F089.PIB.V12.2027.M",                    # EEE, expectativa de crecimiento del PIB 2027 (%)
+    "pib_nominal_trimestral": "F032.PIB.FLU.N.CLP.EP18.Z.Z.0.T",  # PIB nominal (Cuentas Nacionales), miles de millones $, trimestral
     "dolar_observado": "F073.TCO.PRE.Z.D",                    # usado solo como ejemplo/validación
 }

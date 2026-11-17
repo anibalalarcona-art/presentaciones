@@ -67,6 +67,71 @@ def _cell_xml(ref, kind, value, style):
     raise ValueError(f"tipo de celda desconocido: {kind}")
 
 
+def replace_cell(xlsx_path, sheet_name, cell_ref, kind, value, style=None):
+    """
+    Reemplaza UNA celda ya existente (por ejemplo, pasar de la fórmula
+    supuesta "+E163*(1+3%)" al dato real publicado por el Banco Central),
+    editando sólo esa celda en el XML de la hoja. Si no se pasa `style`, se
+    conserva el estilo que ya tenía la celda.
+    """
+    xlsx_path = str(xlsx_path)
+    tmp_path = xlsx_path + ".celltmp"
+    with zipfile.ZipFile(xlsx_path, "r") as zin:
+        sheet_file = _find_sheet_file(zin, sheet_name)
+        sheet_xml = zin.read(sheet_file).decode("utf-8")
+
+        m = re.search(r'<c r="' + re.escape(cell_ref) + r'"(?:\s+s="(\d+)")?[^>]*(?:/>|>.*?</c>)', sheet_xml)
+        if not m:
+            raise ValueError(f"No encontré la celda {cell_ref} en la hoja {sheet_name!r}")
+        if style is None:
+            style = m.group(1)
+
+        new_cell_xml = _cell_xml(cell_ref, kind, value, style)
+        new_sheet_xml = sheet_xml[: m.start()] + new_cell_xml + sheet_xml[m.end():]
+
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == sheet_file:
+                    data = new_sheet_xml.encode("utf-8")
+                zout.writestr(item, data)
+    shutil.move(tmp_path, xlsx_path)
+
+
+def update_cached_value(xlsx_path, sheet_name, cell_ref, new_value):
+    """
+    Actualiza sólo el valor cacheado (<v>) de una celda que ya tiene una
+    fórmula, dejando la fórmula (<f>...) intacta tal como está. Se usa
+    cuando cambia un valor del que depende la fórmula (p. ej. el PIB
+    nominal real reemplaza al supuesto) y hay que refrescar el resultado
+    sin tocar cómo se calcula.
+    """
+    xlsx_path = str(xlsx_path)
+    tmp_path = xlsx_path + ".cvtmp"
+    with zipfile.ZipFile(xlsx_path, "r") as zin:
+        sheet_file = _find_sheet_file(zin, sheet_name)
+        sheet_xml = zin.read(sheet_file).decode("utf-8")
+
+        m = re.search(r'<c r="' + re.escape(cell_ref) + r'"[^>]*>.*?</c>', sheet_xml)
+        if not m:
+            raise ValueError(f"No encontré la celda {cell_ref} en la hoja {sheet_name!r}")
+        cell_xml = m.group(0)
+        if "<v>" in cell_xml:
+            new_cell_xml = re.sub(r"<v>[^<]*</v>", f"<v>{new_value!r}</v>", cell_xml, count=1)
+        else:
+            new_cell_xml = cell_xml.replace("</f>", f"</f><v>{new_value!r}</v>", 1)
+
+        new_sheet_xml = sheet_xml[: m.start()] + new_cell_xml + sheet_xml[m.end():]
+
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == sheet_file:
+                    data = new_sheet_xml.encode("utf-8")
+                zout.writestr(item, data)
+    shutil.move(tmp_path, xlsx_path)
+
+
 def append_row(xlsx_path, sheet_name, row_num, cells):
     """
     cells: lista de (col_letter, kind, value, style_or_None)

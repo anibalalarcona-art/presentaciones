@@ -123,16 +123,36 @@ entorno); el modo moderno de la API (librería oficial `bcchapi`) usa un
 usuario/clave —el que ya teníamos— sigue funcionando. El INE no pide
 credenciales.
 
-Lo que **no** se auto-completa, y por qué:
+### PIB nominal (columna E de "Balance 2"): se auto-corrige solo cuando el Banco Central publica el dato real
 
-- **`Balance 2`, columnas E/G/N/O/P (PIB nominal y %PIB)**: la columna E no
-  es un dato plano — en el archivo ya es, ella misma, una fórmula que
-  proyecta el trimestre (p. ej. `+E163*(1+3%)`, un supuesto de crecimiento
-  t/t) hasta que alguien la reemplaza a mano por el PIB nominal real. No hay
-  una fuente pública que calce con ese supuesto, así que no se inventa: las
-  filas nuevas llegan con A-D y M, pero sin E/G/N/O/P, y chart4/chart5 no se
-  extienden hasta completarlas (a mano, o replicando esa fórmula si
-  confirman que es el criterio correcto).
+La columna E sí tiene fuente pública real: `F032.PIB.FLU.N.CLP.EP18.Z.Z.0.T`
+(PIB nominal trimestral, Cuentas Nacionales del Banco Central — viene en
+miles de millones de pesos, la hoja usa millones, de ahí el ×1000). El
+archivo ya trae esa serie para todos los trimestres publicados. El
+problema es sólo el trimestre MÁS RECIENTE, mientras el Banco Central
+todavía no lo publica (tiene ~2 meses de rezago): para no dejar el gráfico
+cortado, esa celda trae un supuesto propio puesto a mano (p. ej.
+`+E163*(1+3%)`, asumiendo X% de crecimiento t/t) que luego alguien
+reemplaza por el dato real cuando sale.
+
+`update_from_apis.py` automatiza justo ese reemplazo: en cada corrida
+revisa si la celda E del trimestre más reciente sigue siendo un supuesto
+(fórmula con un `%` en vez de un número) y, si el Banco Central ya publicó
+ese trimestre, la reemplaza por el valor real y recalcula en cascada
+G/N/O/P de los 3 meses de ese trimestre — usando la MISMA fórmula que ya
+tenía cada celda (`SUM(B...)/SUM(G...)*100`), sólo actualiza el resultado
+cacheado. No toca ninguna fórmula ni ningún otro trimestre.
+
+Probado con una Cuentas Nacionales ya publicada (se simuló que el
+trimestre abr-jun 2026 todavía estaba "supuesto" y se dejó que el script lo
+resolviera con el dato real del Banco Central): reconstruyó E, G, N, O y P
+prácticamente idénticos —hasta el décimo decimal— a los que ya tenía el
+archivo real para ese trimestre.
+
+Hoy (nov-2026) el trimestre jul-sep 2026 sigue sin publicarse, así que esto
+no cambia nada todavía — corre solo cuando el Banco Central lo publique.
+
+Lo que **no** se auto-completa, y por qué:
 - **`PIB 2027`, columnas Bloomberg y FMI**: sin fuente pública gratuita
   (Bloomberg) o sin conectar todavía (FMI/WEO). Quedan en blanco en la fila
   nueva, igual que ya aparecen en blanco en meses existentes sin ese dato.

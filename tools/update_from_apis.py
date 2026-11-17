@@ -30,6 +30,7 @@ Uso:
 """
 import argparse
 import datetime
+import re
 import sys
 from pathlib import Path
 
@@ -95,6 +96,74 @@ def plan_balance2(xlsx_path, log):
                     f"hasta completarlas).")
         r = nr
     return plans
+
+
+def plan_pib_nominal(xlsx_path, log):
+    """
+    La columna E de "Balance 2" (PIB nominal) trae, en el último trimestre,
+    un supuesto propio (ej. "+E163*(1+3%)") puesto a mano mientras el Banco
+    Central no publica las Cuentas Nacionales de ese trimestre. Esta función
+    revisa si esa publicación ya está disponible y, si es así, reemplaza el
+    supuesto por el dato real (y recalcula en cascada G/N/O/P de los 3
+    meses de ese trimestre) — sin tocar la fórmula de ninguna celda, sólo
+    los valores que dependen del PIB nominal.
+    """
+    wbf = openpyxl.load_workbook(xlsx_path, data_only=False)
+    wbv = openpyxl.load_workbook(xlsx_path, data_only=True)
+    wsf, wsv = wbf["Balance 2"], wbv["Balance 2"]
+
+    e_rows = [r for r in range(2, 300) if wsv[f"E{r}"].value is not None]
+    if not e_rows:
+        log.append("[PIB nominal] no encontré la columna E de 'Balance 2'.")
+        return []
+    frontier = max(e_rows)
+    formula = wsf[f"E{frontier}"].value
+    if not (isinstance(formula, str) and formula.startswith("=") and "%" in formula):
+        log.append(f"[PIB nominal] fila {frontier} ya tiene el dato real (no es un supuesto) — nada que revisar.")
+        return []
+
+    frontier_date = wsv[f"A{frontier}"].value.date()
+    q_start_month = ((frontier_date.month - 1) // 3) * 3 + 1
+    q_start = datetime.date(frontier_date.year, q_start_month, 1)
+    log.append(f"[PIB nominal] fila {frontier} ({frontier_date.isoformat()}) usa un supuesto propio "
+                f"({formula!r}) para el trimestre que empieza {q_start.isoformat()}; consultando BCCh...")
+
+    obs = dict(bcch_client.get_series(bcch_client.SERIES["pib_nominal_trimestral"],
+                                       firstdate=q_start.isoformat(), lastdate=q_start.isoformat()))
+    if q_start not in obs:
+        log.append(f"[PIB nominal] el Banco Central todavía no publica las Cuentas Nacionales de ese "
+                    f"trimestre — se mantiene el supuesto tal como está.")
+        return []
+
+    real_millones = obs[q_start] * 1000.0  # la serie BCCh viene en miles de millones; la hoja usa millones
+    log.append(f"[PIB nominal] ¡Cuentas Nacionales publicadas! PIB nominal real = {real_millones:,.1f} "
+                f"(antes, supuesto = {wsv[f'E{frontier}'].value:,.1f})")
+
+    plan = [("replace", "Balance 2", f"E{frontier}", "num", real_millones)]
+
+    quarter_rows = [frontier - 2, frontier - 1, frontier]
+    new_g = real_millones / 3.0
+    for r in quarter_rows:
+        if wsv[f"G{r}"].value is not None:
+            plan.append(("cached", "Balance 2", f"G{r}", new_g))
+
+    # recalcula N/O/P de esos mismos 3 meses usando su propia ventana de 12
+    # meses (la misma que ya usa cada fórmula), con el G nuevo sustituido.
+    g_override = {r: new_g for r in quarter_rows}
+    for r in quarter_rows:
+        for col, src_col in (("N", "B"), ("O", "C"), ("P", "D")):
+            cell = wsf[f"{col}{r}"]
+            if not (isinstance(cell.value, str) and "SUM(" in cell.value):
+                continue
+            m = re.search(r"SUM\(" + src_col + r"(\d+):" + src_col + r"(\d+)\).*SUM\(G(\d+):G(\d+)\)", cell.value)
+            if not m:
+                continue
+            b1, b2, g1, g2 = map(int, m.groups())
+            num = sum((wsv[f"{src_col}{k}"].value or 0) for k in range(b1, b2 + 1))
+            den = sum(g_override.get(k, wsv[f"G{k}"].value) or 0 for k in range(g1, g2 + 1))
+            if den:
+                plan.append(("cached", "Balance 2", f"{col}{r}", num / den * 100))
+    return plan
 
 
 def plan_pib2027(xlsx_path, log):
@@ -185,27 +254,40 @@ def main():
     pptx_path = Path(args.pptx)
 
     log = []
-    all_plans = []
+    row_plans = []
     for fn in (plan_balance2, plan_pib2027, plan_empleo):
         try:
-            all_plans.extend(fn(xlsx_path, log))
+            row_plans.extend(fn(xlsx_path, log))
         except Exception as e:
             log.append(f"[{fn.__name__}] ERROR: {e}")
 
+    try:
+        cell_plans = plan_pib_nominal(xlsx_path, log)
+    except Exception as e:
+        cell_plans = []
+        log.append(f"[plan_pib_nominal] ERROR: {e}")
+
     print("\n".join(log))
 
-    if not all_plans:
+    if not row_plans and not cell_plans:
         print("\nNada que actualizar: todas las fuentes ya están al día con el archivo.")
         return
 
     if not args.apply:
-        print(f"\n(dry run: {len(all_plans)} fila(s) nuevas detectadas, no se escribió nada. "
-              f"Corre de nuevo con --apply para escribirlas.)")
+        print(f"\n(dry run: {len(row_plans)} fila(s) nuevas y {len(cell_plans)} celda(s) a corregir detectadas, "
+              f"no se escribió nada. Corre de nuevo con --apply para aplicarlo.)")
         return
 
-    for sheet, row_num, cells in all_plans:
+    for sheet, row_num, cells in row_plans:
         rw.append_row(xlsx_path, sheet, row_num, cells)
-    print(f"\nExcel actualizado ({len(all_plans)} fila(s) nuevas): {xlsx_path}")
+    for op in cell_plans:
+        if op[0] == "replace":
+            _, sheet, cell_ref, kind, value = op
+            rw.replace_cell(xlsx_path, sheet, cell_ref, kind, value)
+        elif op[0] == "cached":
+            _, sheet, cell_ref, value = op
+            rw.update_cached_value(xlsx_path, sheet, cell_ref, value)
+    print(f"\nExcel actualizado ({len(row_plans)} fila(s) nuevas, {len(cell_plans)} celda(s) corregidas): {xlsx_path}")
 
     touched = pptx_chart_sync.sync_pptx(pptx_path, xlsx_path, pptx_path, verbose=True)
     print(f"\npptx actualizado ({len(touched)} gráfico(s)): {pptx_path}")
