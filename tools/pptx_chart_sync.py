@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""
+Sincroniza los gráficos de un .pptx con los datos vivos de su libro Excel fuente.
+
+Cada gráfico del .pptx (ppt/charts/chartN.xml) guarda, además de un vínculo
+externo al Excel original, una "caché" de los valores que efectivamente se
+dibujan (<c:numCache>/<c:strCache>). PowerPoint sólo refresca esa caché si
+abres el archivo conectado a la red donde vive el Excel. Este script hace lo
+mismo sin PowerPoint: lee el Excel, encuentra para cada serie el rango de
+celdas que la alimenta (su fórmula <c:f>, p.ej. "Combustibles!$B$3:$B$48"),
+toma los valores actuales de esas celdas (extendiendo el rango si hay filas o
+columnas nuevas con datos) y reescribe sólo esa caché dentro del XML del
+gráfico. Todo lo demás del .pptx (diseño, colores, fuentes, texto, capas)
+queda byte a byte intacto.
+
+Uso:
+    python3 pptx_chart_sync.py --xlsx "Graficos.xlsx" --pptx "Laminas.pptx" --out "Laminas.pptx"
+
+Sin --out, escribe "<nombre>.synced.pptx" junto al original.
+"""
+import argparse
+import re
+import shutil
+import sys
+import zipfile
+from datetime import date, datetime
+from pathlib import Path
+
+import openpyxl
+from openpyxl.utils import column_index_from_string, get_column_letter
+
+EXCEL_EPOCH = date(1899, 12, 30)
+MAX_SCAN = 600  # cuántas filas/columnas más allá del rango actual se exploran buscando datos nuevos
+
+CELL_REF_RE = re.compile(
+    r"^(?:'([^']+)'|([^!']+))!\$([A-Za-z]+)\$(\d+)(?::\$([A-Za-z]+)\$(\d+))?$"
+)
+
+
+class RefParseError(ValueError):
+    pass
+
+
+def to_serial(value):
+    """Convierte fechas de Excel/Python al número de serie que usa el caché del gráfico."""
+    if isinstance(value, datetime):
+        value = value.date()
+    if isinstance(value, date):
+        return (value - EXCEL_EPOCH).days
+    return value
+
+
+def fmt_number(value):
+    if isinstance(value, float) and value.is_integer() and abs(value) < 1e15:
+        return str(int(value))
+    return repr(value) if isinstance(value, float) else str(value)
+
+
+def parse_ref(ref):
+    m = CELL_REF_RE.match(ref)
+    if not m:
+        raise RefParseError(f"No pude interpretar la referencia de celda: {ref!r}")
+    sheet = m.group(1) or m.group(2)
+    c1, r1 = m.group(3), int(m.group(4))
+    if m.group(5):
+        c2, r2 = m.group(5), int(m.group(6))
+    else:
+        c2, r2 = c1, r1
+    return sheet, c1, r1, c2, r2
+
+
+def format_ref(sheet, c1, r1, c2, r2):
+    needs_quote = not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", sheet)
+    s = f"'{sheet}'" if needs_quote else sheet
+    if c1 == c2 and r1 == r2:
+        return f"{s}!${c1}${r1}"
+    return f"{s}!${c1}${r1}:${c2}${r2}"
+
+
+def is_row_range(c1, r1, c2, r2):
+    return r1 == r2 and c1 != c2
+
+
+def is_col_range(c1, r1, c2, r2):
+    return c1 == c2 and r1 != r2
+
+
+def cell_value(ws, col, row):
+    return ws[f"{col}{row}"].value
+
+
+def scan_extent(ws, sheet_name, c1, r1, c2, r2, max_scan=MAX_SCAN):
+    """
+    A partir del rango declarado, explora más allá (más filas o más columnas,
+    según la orientación) y devuelve el nuevo extremo final que sigue teniendo
+    datos. No se detiene en el primer hueco: recorre toda la ventana y toma el
+    último índice no vacío, para no cortar la serie por un dato faltante
+    intermedio (p.ej. un pronóstico que aún no publica una institución).
+    """
+    if is_row_range(c1, r1, c2, r2) or (c1 == c2 and r1 == r2):
+        start_idx = column_index_from_string(c1)
+        end_idx = column_index_from_string(c2)
+        last_nonempty = end_idx
+        for i in range(start_idx, end_idx + max_scan + 1):
+            col = get_column_letter(i)
+            v = cell_value(ws, col, r1)
+            if v is not None:
+                last_nonempty = i
+            elif i > end_idx and i - last_nonempty > 20:
+                break
+        return c1, r1, get_column_letter(last_nonempty), r2
+    else:
+        last_nonempty = r2
+        for r in range(r1, r2 + max_scan + 1):
+            v = cell_value(ws, c1, r)
+            if v is not None:
+                last_nonempty = r
+            elif r > r2 and r - last_nonempty > 20:
+                break
+        return c1, r1, c2, last_nonempty
+
+
+def read_values(ws, c1, r1, c2, r2):
+    if is_row_range(c1, r1, c2, r2) or (c1 == c2 and r1 == r2):
+        out = []
+        for i in range(column_index_from_string(c1), column_index_from_string(c2) + 1):
+            out.append(cell_value(ws, get_column_letter(i), r1))
+        return out
+    else:
+        out = []
+        for r in range(r1, r2 + 1):
+            out.append(cell_value(ws, c1, r))
+        return out
+
+
+def build_cache_xml(tag, format_code, values, is_date=False):
+    """tag es 'c:numCache' o 'c:strCache'."""
+    pts = []
+    for i, v in enumerate(values):
+        if v is None or v == "":
+            continue
+        if is_date:
+            v = to_serial(v)
+        v_str = fmt_number(v) if not isinstance(v, str) else v
+        pts.append(f'<c:pt idx="{i}"><c:v>{v_str}</c:v></c:pt>')
+    fmt = f"<c:formatCode>{format_code}</c:formatCode>" if format_code else ""
+    return f'<{tag}>{fmt}<c:ptCount val="{len(values)}"/>{"".join(pts)}</{tag}>'
+
+
+def process_ref_block(block_xml, wb, grow=True, report=None):
+    """
+    Recibe el contenido de un <c:cat> o <c:val> (incluye <c:numRef>/<c:strRef>),
+    localiza su <c:f>, relee los datos del Excel (extendiendo el rango si
+    corresponde) y devuelve el bloque reescrito.
+    """
+    f_match = re.search(r"<c:f>([^<]*)</c:f>", block_xml)
+    if not f_match:
+        return block_xml  # literal (c:numLit/c:strLit) sin vínculo a celdas: no se toca
+    ref = f_match.group(1)
+    try:
+        sheet, c1, r1, c2, r2 = parse_ref(ref)
+    except RefParseError as e:
+        if report is not None:
+            report.append(f"  ! {e}")
+        return block_xml
+
+    if sheet not in wb.sheetnames:
+        if report is not None:
+            report.append(f"  ! hoja '{sheet}' no existe en el Excel, se deja igual")
+        return block_xml
+    ws = wb[sheet]
+
+    is_num = "<c:numRef>" in block_xml or "<c:numCache>" in block_xml
+    cache_tag = "c:numCache" if is_num else "c:strCache"
+    fmt_match = re.search(r"<c:formatCode>([^<]*)</c:formatCode>", block_xml)
+    format_code = fmt_match.group(1) if fmt_match else None
+    is_date = bool(format_code and ("m" in format_code.lower() and "y" in format_code.lower()))
+
+    new_c1, new_r1, new_c2, new_r2 = (c1, r1, c2, r2)
+    if grow:
+        new_c1, new_r1, new_c2, new_r2 = scan_extent(ws, sheet, c1, r1, c2, r2)
+
+    values = read_values(ws, new_c1, new_r1, new_c2, new_r2)
+    new_ref = format_ref(sheet, new_c1, new_r1, new_c2, new_r2)
+    new_cache = build_cache_xml(cache_tag, format_code, values, is_date=is_date)
+
+    if report is not None and (new_ref != ref or True):
+        n = sum(1 for v in values if v is not None)
+        growth = f" (antes {ref})" if new_ref != ref else ""
+        report.append(f"  {new_ref}{growth}: {n} puntos")
+
+    new_block = re.sub(r"<c:f>[^<]*</c:f>", f"<c:f>{new_ref}</c:f>", block_xml, count=1)
+    cache_re = re.compile(r"<c:numCache>.*?</c:numCache>|<c:strCache>.*?</c:strCache>", re.S)
+    if cache_re.search(new_block):
+        new_block = cache_re.sub(lambda m: new_cache, new_block, count=1)
+    else:
+        # no había caché (poco común): insertarla justo después de </c:f>
+        new_block = new_block.replace(f"<c:f>{new_ref}</c:f>", f"<c:f>{new_ref}</c:f>{new_cache}", 1)
+    return new_block
+
+
+def process_series_block(ser_xml, wb, report=None):
+    name_match = re.search(r"<c:tx>.*?<c:v>([^<]*)</c:v>", ser_xml, re.S)
+    sname = name_match.group(1) if name_match else "(sin nombre)"
+    if report is not None:
+        report.append(f"- serie: {sname}")
+
+    def repl_cat(m):
+        return "<c:cat>" + process_ref_block(m.group(1), wb, grow=True, report=report) + "</c:cat>"
+
+    def repl_val(m):
+        return "<c:val>" + process_ref_block(m.group(1), wb, grow=True, report=report) + "</c:val>"
+
+    ser_xml = re.sub(r"<c:cat>(.*?)</c:cat>", repl_cat, ser_xml, count=1, flags=re.S)
+    ser_xml = re.sub(r"<c:val>(.*?)</c:val>", repl_val, ser_xml, count=1, flags=re.S)
+    return ser_xml
+
+
+def sync_chart_xml(xml_text, wb, report=None):
+    ser_re = re.compile(r"<c:ser>.*?</c:ser>", re.S)
+    spans = [m.span() for m in ser_re.finditer(xml_text)]
+    if not spans:
+        return xml_text
+    pieces = [xml_text[: spans[0][0]]]
+    for i, (start, end) in enumerate(spans):
+        new_block = process_series_block(xml_text[start:end], wb, report=report)
+        pieces.append(new_block)
+        next_start = spans[i + 1][0] if i + 1 < len(spans) else len(xml_text)
+        pieces.append(xml_text[end:next_start])
+    return "".join(pieces)
+
+
+def sync_pptx(pptx_path, xlsx_path, out_path, chart_filter=None, verbose=True):
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+
+    shutil.copyfile(pptx_path, out_path)
+    with zipfile.ZipFile(pptx_path, "r") as zin:
+        chart_names = sorted(
+            n for n in zin.namelist()
+            if re.match(r"ppt/charts/chart\d+\.xml$", n)
+        )
+        if chart_filter:
+            chart_names = [n for n in chart_names if any(f in n for f in chart_filter)]
+
+        updates = {}
+        for name in chart_names:
+            xml_text = zin.read(name).decode("utf-8")
+            report = [] if verbose else None
+            if verbose:
+                print(f"\n== {name} ==")
+            new_xml = sync_chart_xml(xml_text, wb, report=report)
+            if verbose:
+                for line in report:
+                    print(line)
+            updates[name] = new_xml
+
+        # reescribe el zip completo, sustituyendo sólo los chartN.xml tocados
+        tmp_out = str(out_path) + ".tmp"
+        with zipfile.ZipFile(tmp_out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename in updates:
+                    data = updates[item.filename].encode("utf-8")
+                zout.writestr(item, data)
+    shutil.move(tmp_out, out_path)
+    return list(updates.keys())
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--xlsx", required=True, help="Excel fuente (el que alimenta los gráficos)")
+    ap.add_argument("--pptx", required=True, help="Presentación .pptx a actualizar")
+    ap.add_argument("--out", help="Ruta de salida (por defecto: <pptx>.synced.pptx)")
+    ap.add_argument("--chart", action="append", help="Limitar a chartN.xml específicos, p.ej. --chart chart1 --chart chart7")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    pptx_path = Path(args.pptx)
+    xlsx_path = Path(args.xlsx)
+    out_path = Path(args.out) if args.out else pptx_path.with_suffix(".synced.pptx")
+
+    touched = sync_pptx(pptx_path, xlsx_path, out_path, chart_filter=args.chart, verbose=not args.quiet)
+    print(f"\nListo. {len(touched)} gráfico(s) actualizados -> {out_path}")
+
+
+if __name__ == "__main__":
+    main()
