@@ -199,10 +199,16 @@ def merge(a_path, b_path, out_path):
     b_rel_entries = re.findall(r'<Relationship Id="rId(\d+)"[^>]*Target="([^"]+)"[^>]*/>', rels_b)
     keep_entries = []
     next_rid = max_rid_a + 1
+    # partes "singleton" del paquete que B también declara pero que NO se
+    # copian de B (usamos las de A): si no se descartan aquí también sus
+    # relaciones, quedan dos Relationship (uno de A, uno de B) apuntando al
+    # mismo target con distinto rId, lo que PowerPoint rechaza como dañado.
+    SKIP_REL_FNAMES = {"notesMaster1.xml", "presProps.xml", "viewProps.xml", "tableStyles.xml"}
+
     for old_rid, target in b_rel_entries:
         fname = target.split("/")[-1]
-        if fname in ("notesMaster1.xml",):
-            continue  # no copiamos el notesMaster de B
+        if fname in SKIP_REL_FNAMES:
+            continue  # no copiamos esta parte de B (ya existe en A o no aplica)
         rid_map[old_rid] = str(next_rid)
         next_rid += 1
 
@@ -212,8 +218,11 @@ def merge(a_path, b_path, out_path):
 
     rels_b_body = re.sub(r"<\?xml[^>]*\?>\s*<Relationships[^>]*>", "", rels_b)
     rels_b_body = rels_b_body.replace("</Relationships>", "")
-    # descarta el Relationship del notesMaster de B
-    rels_b_body = re.sub(r'<Relationship Id="rId\d+"[^>]*Target="notesMasters/notesMaster1\.xml"[^>]*/>', "", rels_b_body)
+    # descarta los Relationship de B hacia las partes "singleton" de arriba
+    rels_b_body = re.sub(
+        r'<Relationship Id="rId\d+"[^>]*Target="(?:[^"]*/)?(?:' + "|".join(re.escape(f) for f in SKIP_REL_FNAMES) + r')"[^>]*/>',
+        "", rels_b_body,
+    )
     rels_b_body = re.sub(r'rId(\d+)', lambda m: ("rId" + rid_map[m.group(1)]) if m.group(1) in rid_map else m.group(0), rels_b_body)
     rels_b_body = rewrite_text(rels_b_body, rename_map)
     merged["ppt/_rels/presentation.xml.rels"] = (rels_a.replace("</Relationships>", rels_b_body + "</Relationships>")).encode("utf-8")
