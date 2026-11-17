@@ -79,6 +79,53 @@ Si alguna vez SÍ quieres que el "2027" entre al gráfico, corre sin ese
 flag una vez (o agrega la columna a mano en el rango del gráfico, en
 Excel).
 
+## Tipo de Cambio Real (BIS): `update_tc_from_apis.py`
+
+Mismo patrón que `update_from_apis.py`, pero para `Gráficos_TC.xlsx` /
+`Láminas_TC.pptx`, con el BIS (Bank for International Settlements) como
+fuente. El enlace que ya traía la hoja "TCR" (`data.bis.org/topics/EER`)
+apunta a la serie `WS_EER` (REER real, canasta amplia, mensual) de los 15
+países/áreas del gráfico — confirmado: los valores de la API calzan exacto
+con los que ya había en el Excel (`tools/bis_client.py`).
+
+```bash
+python3 tools/update_tc_from_apis.py \
+  --xlsx "Gráficos_TC.xlsx" --pptx "Láminas_TC.pptx" --apply
+```
+
+Qué hace cuando el BIS publica un mes nuevo (ver el docstring del script
+para el detalle completo):
+
+1. Llena la fila ya pre-armada de "TCR" (trae la fecha puesta, esperando
+   los 15 valores) y extiende los "Prom. 5a"/"Prom. 10a" de esa hoja.
+2. En "TCR (ajustado)": esa fila tenía una fórmula que PROYECTABA el valor
+   con el forward de tipo de cambio (p. ej. `+B145*TCN!B208/TCN!B207`,
+   mientras no existía el dato real). La reemplaza por la misma fórmula
+   que ya usan los meses reales (`(100/TCR!B146)*100` o `+TCR!G146` según
+   la columna), tomada de la fila anterior y desplazada una fila — no
+   inventa el patrón, copia el que el propio archivo ya usa para esa
+   columna.
+3. Recalcula en cascada las filas de proyección siguientes (que ahora
+   parten de un valor real), los promedios 5a/10a, y "TCR estimado <mes>"
+   (que pasa a apuntar al próximo mes, el que todavía no es real).
+4. Reordena la tabla de ranking (15 países de mayor a menor TCR, la que
+   alimenta los gráficos de las láminas 8 y 9) — en el archivo original
+   esa tabla está pegada a mano, no por fórmula; el script la recalcula
+   entera cada vez a partir de los promedios del paso 3.
+5. Sincroniza pptx + gráficos nativos del Excel, con `--no-grow-sheet
+   Resumen` (ver arriba) para no reintroducir la columna "2027".
+
+**Validado con un "retroceso" controlado** (el mismo método que para el
+otro archivo): en una copia descartable, se borró el último mes real
+(sep-26) simulando que el BIS todavía no lo publicaba, y se revirtieron a
+mano las fórmulas de "TCR (ajustado)" a cómo se verían antes de esa
+publicación. Se corrió el script con los datos reales del BIS para ese
+mes, y reconstruyó — al dato, incluida la tabla de ranking reordenada —
+exactamente los mismos valores que ya tenía el archivo real.
+
+Hoy (nov-2026) el BIS todavía no publica octubre, así que correrlo no
+cambia nada — pero queda listo para cuando lo publique.
+
 Mapa de `chartN.xml` → lámina y gráfico:
 
 | Archivo | Lámina | Gráfico |

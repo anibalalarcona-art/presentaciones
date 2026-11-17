@@ -23,6 +23,8 @@ import zipfile
 from datetime import date, datetime
 from pathlib import Path
 
+from openpyxl.utils import column_index_from_string
+
 EXCEL_EPOCH = date(1899, 12, 30)
 
 
@@ -88,6 +90,104 @@ def replace_cell(xlsx_path, sheet_name, cell_ref, kind, value, style=None):
 
         new_cell_xml = _cell_xml(cell_ref, kind, value, style)
         new_sheet_xml = sheet_xml[: m.start()] + new_cell_xml + sheet_xml[m.end():]
+
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == sheet_file:
+                    data = new_sheet_xml.encode("utf-8")
+                zout.writestr(item, data)
+    shutil.move(tmp_path, xlsx_path)
+
+
+def update_formula_and_value(xlsx_path, sheet_name, cell_ref, new_formula_text, new_value):
+    """
+    Cambia TANTO el texto de la fórmula como su valor cacheado de una celda
+    que ya existe, preservando cualquier atributo del <f> (p. ej.
+    t="shared" ref="..." si="N", para no romper el grupo de fórmula
+    compartida del que es "maestra"). Úsala cuando la fórmula en sí debe
+    cambiar (p. ej. pasar de proyectar con el forward a leer el dato real
+    recién publicado), a diferencia de update_cached_value (que sólo
+    refresca el resultado de una fórmula que no cambia).
+    """
+    xlsx_path = str(xlsx_path)
+    tmp_path = xlsx_path + ".fvtmp"
+    with zipfile.ZipFile(xlsx_path, "r") as zin:
+        sheet_file = _find_sheet_file(zin, sheet_name)
+        sheet_xml = zin.read(sheet_file).decode("utf-8")
+
+        m = re.search(r'<c r="' + re.escape(cell_ref) + r'"[^>]*>.*?</c>', sheet_xml)
+        if not m:
+            raise ValueError(f"No encontré la celda {cell_ref} en la hoja {sheet_name!r}")
+        cell_xml = m.group(0)
+        if "<f" not in cell_xml:
+            raise ValueError(f"{cell_ref} no tiene fórmula; usa replace_cell para ponerle una.")
+        new_cell_xml = re.sub(r"(<f[^>]*>)[^<]*(</f>)", lambda mm: mm.group(1) + _xml_escape(new_formula_text) + mm.group(2), cell_xml, count=1)
+        if "<v>" in new_cell_xml:
+            new_cell_xml = re.sub(r"<v>[^<]*</v>", f"<v>{new_value!r}</v>", new_cell_xml, count=1)
+        else:
+            new_cell_xml = new_cell_xml.replace("</f>", f"</f><v>{new_value!r}</v>", 1)
+
+        new_sheet_xml = sheet_xml[: m.start()] + new_cell_xml + sheet_xml[m.end():]
+
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if item.filename == sheet_file:
+                    data = new_sheet_xml.encode("utf-8")
+                zout.writestr(item, data)
+    shutil.move(tmp_path, xlsx_path)
+
+
+def insert_cells_into_row(xlsx_path, sheet_name, row_num, cells):
+    """
+    Agrega celdas a una fila que YA EXISTE pero no las tiene todas (p. ej.
+    una fila "plantilla" que ya trae la fecha pero no los 15 valores, a la
+    espera del próximo dato). A diferencia de append_row (que crea la fila
+    completa), esto respeta lo que la fila ya tenía y sólo agrega lo que
+    falta, en el orden de columna correcto (obligatorio en OOXML).
+
+    cells: misma forma que en append_row — lista de
+    (col_letter, kind, value, style_or_None). Si una columna ya tiene celda
+    en esa fila, se dejará como estaba (no se pisa).
+    """
+    xlsx_path = str(xlsx_path)
+    tmp_path = xlsx_path + ".instmp"
+    with zipfile.ZipFile(xlsx_path, "r") as zin:
+        sheet_file = _find_sheet_file(zin, sheet_name)
+        sheet_xml = zin.read(sheet_file).decode("utf-8")
+
+        row_m = re.search(r'<row r="' + str(row_num) + r'"[^>]*>(.*?)</row>', sheet_xml, re.S)
+        if not row_m:
+            raise ValueError(f"La fila {row_num} de {sheet_name!r} no existe; usa append_row.")
+        row_inner = row_m.group(1)
+
+        existing = {}
+        for cm in re.finditer(r'<c r="([A-Z]+)' + str(row_num) + r'"[^>]*(?:/>|>.*?</c>)', row_inner):
+            existing[cm.group(1)] = cm.span()
+
+        new_cells = {}
+        for col, kind, value, style in cells:
+            if col in existing:
+                continue
+            if style is None:
+                style = _style_above(sheet_xml, col, row_num - 1)
+            new_cells[col] = _cell_xml(f"{col}{row_num}", kind, value, style)
+
+        if not new_cells:
+            raise ValueError(f"Todas las columnas pedidas ya existían en la fila {row_num} de {sheet_name!r}.")
+
+        # arma la fila completa en orden de columna
+        all_cols = sorted(set(existing) | set(new_cells), key=column_index_from_string)
+        pieces = []
+        for col in all_cols:
+            if col in new_cells:
+                pieces.append(new_cells[col])
+            else:
+                start, end = existing[col]
+                pieces.append(row_inner[start:end])
+        new_row_inner = "".join(pieces)
+        new_sheet_xml = sheet_xml[: row_m.start(1)] + new_row_inner + sheet_xml[row_m.end(1):]
 
         with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
