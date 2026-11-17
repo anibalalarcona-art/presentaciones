@@ -70,7 +70,7 @@ def parse_ref(ref):
 
 
 def format_ref(sheet, c1, r1, c2, r2):
-    needs_quote = not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", sheet)
+    needs_quote = not re.match(r"^[^\W\d][\w]*$", sheet, re.UNICODE)
     s = f"'{sheet}'" if needs_quote else sheet
     if c1 == c2 and r1 == r2:
         return f"{s}!${c1}${r1}"
@@ -91,33 +91,49 @@ def cell_value(ws, col, row):
 
 def scan_extent(ws, sheet_name, c1, r1, c2, r2, max_scan=MAX_SCAN):
     """
-    A partir del rango declarado, explora más allá (más filas o más columnas,
-    según la orientación) y devuelve el nuevo extremo final que sigue teniendo
-    datos. No se detiene en el primer hueco: recorre toda la ventana y toma el
-    último índice no vacío, para no cortar la serie por un dato faltante
-    intermedio (p.ej. un pronóstico que aún no publica una institución).
+    A partir del rango declarado, devuelve el nuevo extremo final.
+
+    Dos pasos, con tolerancia distinta a propósito:
+    1) RECORTAR dentro del rango ya declarado: toma el último índice no
+       vacío entre el inicio y el final declarado, tolerando huecos
+       internos (p.ej. un pronóstico que aún no publica una institución
+       un mes dado) — así no se corta la serie por un dato faltante
+       intermedio.
+    2) CRECER más allá del final declarado: sólo avanza mientras las
+       celdas siguientes estén seguidas, sin tolerar ningún hueco. Una
+       sola celda vacía detiene el crecimiento. Esto es a propósito más
+       estricto que el recorte: una hoja puede tener, en la misma fila o
+       columna, OTRO bloque de datos no relacionado un poco más allá (p.ej.
+       celdas de apoyo para otro cálculo) separado por una sola celda en
+       blanco — tolerar huecos al crecer terminaría incorporando ese
+       bloque ajeno al rango del gráfico.
     """
     if is_row_range(c1, r1, c2, r2) or (c1 == c2 and r1 == r2):
         start_idx = column_index_from_string(c1)
         end_idx = column_index_from_string(c2)
-        last_nonempty = end_idx
-        for i in range(start_idx, end_idx + max_scan + 1):
-            col = get_column_letter(i)
-            v = cell_value(ws, col, r1)
-            if v is not None:
-                last_nonempty = i
-            elif i > end_idx and i - last_nonempty > 20:
+        trimmed_end = start_idx
+        for i in range(start_idx, end_idx + 1):
+            if cell_value(ws, get_column_letter(i), r1) is not None:
+                trimmed_end = i
+        grown_end = end_idx
+        for i in range(end_idx + 1, end_idx + max_scan + 1):
+            if cell_value(ws, get_column_letter(i), r1) is not None:
+                grown_end = i
+            else:
                 break
-        return c1, r1, get_column_letter(last_nonempty), r2
+        return c1, r1, get_column_letter(max(trimmed_end, grown_end)), r2
     else:
-        last_nonempty = r2
-        for r in range(r1, r2 + max_scan + 1):
-            v = cell_value(ws, c1, r)
-            if v is not None:
-                last_nonempty = r
-            elif r > r2 and r - last_nonempty > 20:
+        trimmed_end = r1
+        for r in range(r1, r2 + 1):
+            if cell_value(ws, c1, r) is not None:
+                trimmed_end = r
+        grown_end = r2
+        for r in range(r2 + 1, r2 + max_scan + 1):
+            if cell_value(ws, c1, r) is not None:
+                grown_end = r
+            else:
                 break
-        return c1, r1, c2, last_nonempty
+        return c1, r1, c2, max(trimmed_end, grown_end)
 
 
 def read_values(ws, c1, r1, c2, r2):
