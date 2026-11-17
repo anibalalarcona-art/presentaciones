@@ -163,11 +163,17 @@ def build_cache_xml(tag, format_code, values, is_date=False):
     return f'<{tag}>{fmt}<c:ptCount val="{len(values)}"/>{"".join(pts)}</{tag}>'
 
 
-def process_ref_block(block_xml, wb, grow=True, report=None):
+def process_ref_block(block_xml, wb, grow=True, report=None, no_grow_sheets=frozenset()):
     """
     Recibe el contenido de un <c:cat> o <c:val> (incluye <c:numRef>/<c:strRef>),
     localiza su <c:f>, relee los datos del Excel (extendiendo el rango si
     corresponde) y devuelve el bloque reescrito.
+
+    `no_grow_sheets`: nombres de hoja donde NUNCA se crece el rango más allá
+    de lo ya declarado (sí se sigue recortando si el final tiene celdas
+    vacías). Para hojas de cálculo/resumen de uso mixto, donde "la celda
+    de al lado" puede pertenecer a otro bloque de datos sin relación con el
+    gráfico, en vez de ser el siguiente dato real de la serie.
     """
     f_match = re.search(r"<c:f>([^<]*)</c:f>", block_xml)
     if not f_match:
@@ -194,7 +200,8 @@ def process_ref_block(block_xml, wb, grow=True, report=None):
 
     new_c1, new_r1, new_c2, new_r2 = (c1, r1, c2, r2)
     if grow:
-        new_c1, new_r1, new_c2, new_r2 = scan_extent(ws, sheet, c1, r1, c2, r2)
+        max_scan = 0 if sheet in no_grow_sheets else MAX_SCAN
+        new_c1, new_r1, new_c2, new_r2 = scan_extent(ws, sheet, c1, r1, c2, r2, max_scan=max_scan)
 
     values = read_values(ws, new_c1, new_r1, new_c2, new_r2)
     new_ref = format_ref(sheet, new_c1, new_r1, new_c2, new_r2)
@@ -215,38 +222,38 @@ def process_ref_block(block_xml, wb, grow=True, report=None):
     return new_block
 
 
-def process_series_block(ser_xml, wb, report=None):
+def process_series_block(ser_xml, wb, report=None, no_grow_sheets=frozenset()):
     name_match = re.search(r"<c:tx>.*?<c:v>([^<]*)</c:v>", ser_xml, re.S)
     sname = name_match.group(1) if name_match else "(sin nombre)"
     if report is not None:
         report.append(f"- serie: {sname}")
 
     def repl_cat(m):
-        return "<c:cat>" + process_ref_block(m.group(1), wb, grow=True, report=report) + "</c:cat>"
+        return "<c:cat>" + process_ref_block(m.group(1), wb, grow=True, report=report, no_grow_sheets=no_grow_sheets) + "</c:cat>"
 
     def repl_val(m):
-        return "<c:val>" + process_ref_block(m.group(1), wb, grow=True, report=report) + "</c:val>"
+        return "<c:val>" + process_ref_block(m.group(1), wb, grow=True, report=report, no_grow_sheets=no_grow_sheets) + "</c:val>"
 
     ser_xml = re.sub(r"<c:cat>(.*?)</c:cat>", repl_cat, ser_xml, count=1, flags=re.S)
     ser_xml = re.sub(r"<c:val>(.*?)</c:val>", repl_val, ser_xml, count=1, flags=re.S)
     return ser_xml
 
 
-def sync_chart_xml(xml_text, wb, report=None):
+def sync_chart_xml(xml_text, wb, report=None, no_grow_sheets=frozenset()):
     ser_re = re.compile(r"<c:ser>.*?</c:ser>", re.S)
     spans = [m.span() for m in ser_re.finditer(xml_text)]
     if not spans:
         return xml_text
     pieces = [xml_text[: spans[0][0]]]
     for i, (start, end) in enumerate(spans):
-        new_block = process_series_block(xml_text[start:end], wb, report=report)
+        new_block = process_series_block(xml_text[start:end], wb, report=report, no_grow_sheets=no_grow_sheets)
         pieces.append(new_block)
         next_start = spans[i + 1][0] if i + 1 < len(spans) else len(xml_text)
         pieces.append(xml_text[end:next_start])
     return "".join(pieces)
 
 
-def sync_charts_in_zip(src_path, out_path, wb, chart_prefix, chart_filter=None, verbose=True):
+def sync_charts_in_zip(src_path, out_path, wb, chart_prefix, chart_filter=None, verbose=True, no_grow_sheets=frozenset()):
     """
     Motor genérico: reescribe los chartN.xml de CUALQUIER paquete OOXML
     (un .pptx o un .xlsx; ambos son zips con el mismo esquema de gráficos)
@@ -270,7 +277,7 @@ def sync_charts_in_zip(src_path, out_path, wb, chart_prefix, chart_filter=None, 
             report = [] if verbose else None
             if verbose:
                 print(f"\n== {name} ==")
-            new_xml = sync_chart_xml(xml_text, wb, report=report)
+            new_xml = sync_chart_xml(xml_text, wb, report=report, no_grow_sheets=no_grow_sheets)
             if verbose:
                 for line in report:
                     print(line)
@@ -287,13 +294,13 @@ def sync_charts_in_zip(src_path, out_path, wb, chart_prefix, chart_filter=None, 
     return list(updates.keys())
 
 
-def sync_pptx(pptx_path, xlsx_path, out_path, chart_filter=None, verbose=True):
+def sync_pptx(pptx_path, xlsx_path, out_path, chart_filter=None, verbose=True, no_grow_sheets=frozenset()):
     """Actualiza los gráficos de un .pptx a partir de un Excel EXTERNO."""
     wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-    return sync_charts_in_zip(pptx_path, out_path, wb, "ppt/charts/", chart_filter=chart_filter, verbose=verbose)
+    return sync_charts_in_zip(pptx_path, out_path, wb, "ppt/charts/", chart_filter=chart_filter, verbose=verbose, no_grow_sheets=no_grow_sheets)
 
 
-def sync_xlsx_own_charts(xlsx_path, out_path, chart_filter=None, verbose=True):
+def sync_xlsx_own_charts(xlsx_path, out_path, chart_filter=None, verbose=True, no_grow_sheets=frozenset()):
     """
     Actualiza los gráficos NATIVOS de un .xlsx (los que se ven al abrirlo en
     Excel) a partir de sus propias hojas de datos. Es el mismo mecanismo que
@@ -304,7 +311,7 @@ def sync_xlsx_own_charts(xlsx_path, out_path, chart_filter=None, verbose=True):
     openpyxl(data_only=True) sobre xlsx_path antes de tocar el zip.
     """
     wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-    return sync_charts_in_zip(xlsx_path, out_path, wb, "xl/charts/", chart_filter=chart_filter, verbose=verbose)
+    return sync_charts_in_zip(xlsx_path, out_path, wb, "xl/charts/", chart_filter=chart_filter, verbose=verbose, no_grow_sheets=no_grow_sheets)
 
 
 def main():
@@ -318,6 +325,15 @@ def main():
         action="store_true",
         help="No tocar los gráficos nativos del propio Excel (por defecto SÍ se actualizan, en el mismo archivo --xlsx).",
     )
+    ap.add_argument(
+        "--no-grow-sheet",
+        action="append",
+        default=[],
+        help="Nombre de hoja donde nunca crecer un rango más allá de lo ya declarado "
+             "(sí se sigue recortando si el final tiene celdas vacías). Repetible. "
+             "Útil para hojas de uso mixto donde la celda de al lado puede pertenecer "
+             "a otro bloque de datos sin relación con el gráfico.",
+    )
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -325,12 +341,13 @@ def main():
     xlsx_path = Path(args.xlsx)
     out_path = Path(args.out) if args.out else pptx_path.with_suffix(".synced.pptx")
     verbose = not args.quiet
+    no_grow_sheets = set(args.no_grow_sheet)
 
-    touched = sync_pptx(pptx_path, xlsx_path, out_path, chart_filter=args.chart, verbose=verbose)
+    touched = sync_pptx(pptx_path, xlsx_path, out_path, chart_filter=args.chart, verbose=verbose, no_grow_sheets=no_grow_sheets)
     print(f"\nListo. {len(touched)} gráfico(s) del pptx actualizados -> {out_path}")
 
     if not args.skip_excel_chart:
-        touched_xlsx = sync_xlsx_own_charts(xlsx_path, xlsx_path, chart_filter=args.chart, verbose=verbose)
+        touched_xlsx = sync_xlsx_own_charts(xlsx_path, xlsx_path, chart_filter=args.chart, verbose=verbose, no_grow_sheets=no_grow_sheets)
         print(f"\nListo. {len(touched_xlsx)} gráfico(s) del propio Excel actualizados -> {xlsx_path}")
 
 

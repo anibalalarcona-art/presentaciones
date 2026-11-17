@@ -45,7 +45,39 @@ hay datos nuevos) y reescribir la caché.
 - `--chart chart1 --chart chart7` limita la sincronización a gráficos puntuales
   (los nombres de archivo, no el número de lámina — ver mapa abajo; aplica a
   ambos documentos).
+- `--no-grow-sheet "Nombre hoja"` (repetible): para esa hoja, nunca crece un
+  rango más allá de lo ya declarado (sí lo sigue recortando si el final
+  tiene celdas vacías). Pensado para hojas de uso mixto donde la celda de
+  al lado de un rango puede pertenecer a otro bloque de datos sin relación
+  con el gráfico — ver el caso real más abajo.
 - `--quiet` silencia el detalle por serie.
+
+### Cuando "crecer el rango" no es lo que quieres: `--no-grow-sheet`
+
+Por defecto, si la celda siguiente a un rango ya tiene un dato, se asume
+que es el próximo punto real de la serie y se agrega al gráfico. Eso es
+exactamente lo que quieres en una hoja de serie de tiempo que se va
+extendiendo (una fila nueva cada semana/mes). Pero en una hoja de uso
+mixto —un "Resumen" con una tabla chica para el gráfico y, un poco más
+allá en la misma fila, celdas de apoyo para otro cálculo— esa celda
+vecina puede no tener nada que ver.
+
+Pasó con `Gráficos_TC.xlsx`, hoja `Resumen`: el gráfico de "Proyecciones
+de Tipo de Cambio" usa `Resumen!$M$3:$Q$3` (spot + 4 trimestres), y la
+celda siguiente (`$R$3`) sí tiene un dato real — "2027", la proyección
+anual — pero el autor del gráfico decidió no incluirla (no calza con el
+patrón trimestral del eje). Sincronizar sin avisar la habría vuelto a
+agregar. Por eso, para ese archivo:
+
+```bash
+python3 tools/pptx_chart_sync.py \
+  --xlsx "Gráficos_TC.xlsx" --pptx "Láminas_TC.pptx" --out "Láminas_TC.pptx" \
+  --no-grow-sheet Resumen
+```
+
+Si alguna vez SÍ quieres que el "2027" entre al gráfico, corre sin ese
+flag una vez (o agrega la columna a mano en el rango del gráfico, en
+Excel).
 
 Mapa de `chartN.xml` → lámina y gráfico:
 
