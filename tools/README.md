@@ -25,9 +25,26 @@ python3 tools/pptx_chart_sync.py \
   --out  "Laminas 11112026.pptx"
 ```
 
+Esto actualiza **dos cosas** en cada corrida:
+
+1. Los gráficos del `--pptx` (en `--out`), leyendo los datos del `--xlsx`.
+2. Los gráficos nativos del propio `--xlsx` (los que ves al abrirlo en Excel),
+   **en el mismo archivo**, para que ambos documentos queden consistentes.
+   Usa `--skip-excel-chart` si por algún motivo sólo quieres tocar el pptx.
+
+El Excel trae sus propios `chart1.xml`…`chart8.xml` (son los gráficos que se
+copiaron hacia el pptx en su momento) con la misma estructura y las mismas
+fórmulas de rango que los del pptx, así que se sincronizan con el mismo
+mecanismo: seguir la fórmula de la celda, releer el rango (extendiéndolo si
+hay datos nuevos) y reescribir la caché.
+
 - Sin `--out`, escribe `<pptx>.synced.pptx` junto al original (no pisa nada).
+  El `--xlsx` sí se actualiza en el mismo archivo (a menos que uses
+  `--skip-excel-chart`), porque normalmente quieres que quede como la fuente
+  de verdad al día.
 - `--chart chart1 --chart chart7` limita la sincronización a gráficos puntuales
-  (los nombres de archivo, no el número de lámina — ver mapa abajo).
+  (los nombres de archivo, no el número de lámina — ver mapa abajo; aplica a
+  ambos documentos).
 - `--quiet` silencia el detalle por serie.
 
 Mapa de `chartN.xml` → lámina y gráfico:

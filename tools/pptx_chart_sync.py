@@ -230,14 +230,20 @@ def sync_chart_xml(xml_text, wb, report=None):
     return "".join(pieces)
 
 
-def sync_pptx(pptx_path, xlsx_path, out_path, chart_filter=None, verbose=True):
-    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-
-    shutil.copyfile(pptx_path, out_path)
-    with zipfile.ZipFile(pptx_path, "r") as zin:
+def sync_charts_in_zip(src_path, out_path, wb, chart_prefix, chart_filter=None, verbose=True):
+    """
+    Motor genérico: reescribe los chartN.xml de CUALQUIER paquete OOXML
+    (un .pptx o un .xlsx; ambos son zips con el mismo esquema de gráficos)
+    usando los valores actuales de `wb` (un Workbook de openpyxl abierto con
+    data_only=True). `chart_prefix` es "ppt/charts/" o "xl/charts/".
+    """
+    src_path, out_path = str(src_path), str(out_path)
+    same_file = Path(src_path).resolve() == Path(out_path).resolve()
+    tmp_out = out_path + ".tmp"
+    with zipfile.ZipFile(src_path, "r") as zin:
         chart_names = sorted(
             n for n in zin.namelist()
-            if re.match(r"ppt/charts/chart\d+\.xml$", n)
+            if re.match(re.escape(chart_prefix) + r"chart\d+\.xml$", n)
         )
         if chart_filter:
             chart_names = [n for n in chart_names if any(f in n for f in chart_filter)]
@@ -255,7 +261,6 @@ def sync_pptx(pptx_path, xlsx_path, out_path, chart_filter=None, verbose=True):
             updates[name] = new_xml
 
         # reescribe el zip completo, sustituyendo sólo los chartN.xml tocados
-        tmp_out = str(out_path) + ".tmp"
         with zipfile.ZipFile(tmp_out, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
@@ -266,21 +271,51 @@ def sync_pptx(pptx_path, xlsx_path, out_path, chart_filter=None, verbose=True):
     return list(updates.keys())
 
 
+def sync_pptx(pptx_path, xlsx_path, out_path, chart_filter=None, verbose=True):
+    """Actualiza los gráficos de un .pptx a partir de un Excel EXTERNO."""
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+    return sync_charts_in_zip(pptx_path, out_path, wb, "ppt/charts/", chart_filter=chart_filter, verbose=verbose)
+
+
+def sync_xlsx_own_charts(xlsx_path, out_path, chart_filter=None, verbose=True):
+    """
+    Actualiza los gráficos NATIVOS de un .xlsx (los que se ven al abrirlo en
+    Excel) a partir de sus propias hojas de datos. Es el mismo mecanismo que
+    sync_pptx: cada gráfico ya trae una fórmula de rango (p.ej.
+    "Gasto!$B$2:$B$9"); esto relee esas celdas, extiende el rango si hay
+    filas/columnas nuevas y reescribe la caché del gráfico. Como la caché y
+    el dato en sí viven en el mismo archivo, se lee con el propio
+    openpyxl(data_only=True) sobre xlsx_path antes de tocar el zip.
+    """
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+    return sync_charts_in_zip(xlsx_path, out_path, wb, "xl/charts/", chart_filter=chart_filter, verbose=verbose)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--xlsx", required=True, help="Excel fuente (el que alimenta los gráficos)")
     ap.add_argument("--pptx", required=True, help="Presentación .pptx a actualizar")
-    ap.add_argument("--out", help="Ruta de salida (por defecto: <pptx>.synced.pptx)")
+    ap.add_argument("--out", help="Ruta de salida del pptx (por defecto: <pptx>.synced.pptx)")
     ap.add_argument("--chart", action="append", help="Limitar a chartN.xml específicos, p.ej. --chart chart1 --chart chart7")
+    ap.add_argument(
+        "--skip-excel-chart",
+        action="store_true",
+        help="No tocar los gráficos nativos del propio Excel (por defecto SÍ se actualizan, en el mismo archivo --xlsx).",
+    )
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
     pptx_path = Path(args.pptx)
     xlsx_path = Path(args.xlsx)
     out_path = Path(args.out) if args.out else pptx_path.with_suffix(".synced.pptx")
+    verbose = not args.quiet
 
-    touched = sync_pptx(pptx_path, xlsx_path, out_path, chart_filter=args.chart, verbose=not args.quiet)
-    print(f"\nListo. {len(touched)} gráfico(s) actualizados -> {out_path}")
+    touched = sync_pptx(pptx_path, xlsx_path, out_path, chart_filter=args.chart, verbose=verbose)
+    print(f"\nListo. {len(touched)} gráfico(s) del pptx actualizados -> {out_path}")
+
+    if not args.skip_excel_chart:
+        touched_xlsx = sync_xlsx_own_charts(xlsx_path, xlsx_path, chart_filter=args.chart, verbose=verbose)
+        print(f"\nListo. {len(touched_xlsx)} gráfico(s) del propio Excel actualizados -> {xlsx_path}")
 
 
 if __name__ == "__main__":
