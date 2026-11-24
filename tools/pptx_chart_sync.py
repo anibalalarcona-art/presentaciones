@@ -163,6 +163,98 @@ def build_cache_xml(tag, format_code, values, is_date=False):
     return f'<{tag}>{fmt}<c:ptCount val="{len(values)}"/>{"".join(pts)}</{tag}>'
 
 
+def build_multilvl_cache_xml(fine_values, coarse_values):
+    """
+    Reconstruye un <c:multiLvlStrCache> (eje de categoría de dos niveles,
+    p.ej. fecha + año) a partir de los valores "finos" (uno por columna,
+    todas las celdas) y los "gruesos" (uno por columna también, pero sólo
+    se listan como puntos las celdas no vacías: el nivel grueso es disperso
+    por diseño, un rótulo que sólo aparece al inicio de cada bloque).
+    """
+    n = len(fine_values)
+    fine_pts = "".join(
+        f'<c:pt idx="{i}"><c:v>{v}</c:v></c:pt>' for i, v in enumerate(fine_values) if v not in (None, "")
+    )
+    coarse_pts = "".join(
+        f'<c:pt idx="{i}"><c:v>{v}</c:v></c:pt>' for i, v in enumerate(coarse_values) if v not in (None, "")
+    )
+    return (
+        f'<c:multiLvlStrCache><c:ptCount val="{n}"/>'
+        f'<c:lvl>{fine_pts}</c:lvl>'
+        f'<c:lvl>{coarse_pts}</c:lvl>'
+        f'</c:multiLvlStrCache>'
+    )
+
+
+MESES_ES = {1: "ene", 2: "feb", 3: "mar", 4: "abr", 5: "may", 6: "jun",
+            7: "jul", 8: "ago", 9: "sep", 10: "oct", 11: "nov", 12: "dic"}
+
+
+def _multilvl_label(v):
+    """Una celda del nivel fino de un eje multinivel se guarda como texto
+    (nunca como número con formato): si es fecha, replica el rótulo
+    "mon-aa" en español que usan estos gráficos (jun-24, sep-24, ...)."""
+    if isinstance(v, (datetime, date)):
+        return f"{MESES_ES[v.month]}-{v.year % 100:02d}"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def process_multilvl_ref_block(block_xml, ws, sheet, c1, r1, c2, r2, ref, grow=True, report=None, no_grow_sheets=frozenset()):
+    """
+    Caso especial de process_ref_block para un eje de categoría de DOS
+    NIVELES (<c:multiLvlStrRef>), p.ej. <c:cat> = "Hoja!$C$25:$AW$26" donde
+    la fila 26 trae el rótulo fino en cada columna (una fecha por catastro)
+    y la fila 25 el rótulo grueso, disperso (el año, sólo en la primera
+    columna de cada bloque). openpyxl no sabe recalcular esta caché (sólo
+    <c:numCache>/<c:strCache> de un nivel), así que esto la reconstruye a
+    mano a partir de los valores actuales de ambas filas.
+
+    Sólo soporta el caso de dos filas y muchas columnas (el único que
+    aparece hasta ahora); cualquier otra forma se deja intacta.
+    """
+    if r2 != r1 + 1:
+        if report is not None:
+            report.append(f"  ! rango multinivel con forma inesperada ({ref}), no se toca")
+        return block_xml
+
+    new_c1, new_r1, new_c2, new_r2 = c1, r1, c2, r2
+    if grow:
+        max_scan = 0 if sheet in no_grow_sheets else MAX_SCAN
+        # la fila fina (r2) es la que está siempre poblada en cada columna del
+        # bloque: igual que un rango de una sola fila para efectos de TRIM/GROW.
+        _, _, new_c2_from_fine, _ = scan_extent(ws, sheet, c1, r2, c2, r2, max_scan=max_scan)
+        new_c2 = new_c2_from_fine
+
+    fine_values = [_multilvl_label(cell_value(ws, get_column_letter(i), new_r2))
+                   if cell_value(ws, get_column_letter(i), new_r2) is not None else None
+                   for i in range(column_index_from_string(new_c1), column_index_from_string(new_c2) + 1)]
+    coarse_values = [cell_value(ws, get_column_letter(i), new_r1)
+                      for i in range(column_index_from_string(new_c1), column_index_from_string(new_c2) + 1)]
+    coarse_values = [str(int(v)) if isinstance(v, float) and v.is_integer() else (str(v) if v is not None else None)
+                      for v in coarse_values]
+
+    new_ref = format_ref(sheet, new_c1, new_r1, new_c2, new_r2)
+    new_cache = build_multilvl_cache_xml(fine_values, coarse_values)
+
+    if report is not None:
+        n = sum(1 for v in fine_values if v is not None)
+        growth = f" (antes {ref})" if new_ref != ref else ""
+        report.append(f"  {new_ref}{growth}: {n} puntos (multinivel)")
+
+    new_block = re.sub(r"<c:f>[^<]*</c:f>", f"<c:f>{new_ref}</c:f>", block_xml, count=1)
+    cache_re = re.compile(r"<c:strCache>.*?</c:strCache>|<c:multiLvlStrCache>.*?</c:multiLvlStrCache>", re.S)
+    if cache_re.search(new_block):
+        # por si quedó (de una corrida previa con el bug) una <c:strCache> de
+        # sobra además de la <c:multiLvlStrCache>: nos quedamos con una sola.
+        new_block = cache_re.sub(lambda m: "", new_block)
+        new_block = new_block.replace(f"<c:f>{new_ref}</c:f>", f"<c:f>{new_ref}</c:f>{new_cache}", 1)
+    else:
+        new_block = new_block.replace(f"<c:f>{new_ref}</c:f>", f"<c:f>{new_ref}</c:f>{new_cache}", 1)
+    return new_block
+
+
 def process_ref_block(block_xml, wb, grow=True, report=None, no_grow_sheets=frozenset()):
     """
     Recibe el contenido de un <c:cat> o <c:val> (incluye <c:numRef>/<c:strRef>),
@@ -191,6 +283,10 @@ def process_ref_block(block_xml, wb, grow=True, report=None, no_grow_sheets=froz
             report.append(f"  ! hoja '{sheet}' no existe en el Excel, se deja igual")
         return block_xml
     ws = wb[sheet]
+
+    is_multilvl = "<c:multiLvlStrRef>" in block_xml or "<c:multiLvlStrCache>" in block_xml
+    if is_multilvl:
+        return process_multilvl_ref_block(block_xml, ws, sheet, c1, r1, c2, r2, ref, grow=grow, report=report, no_grow_sheets=no_grow_sheets)
 
     is_num = "<c:numRef>" in block_xml or "<c:numCache>" in block_xml
     cache_tag = "c:numCache" if is_num else "c:strCache"

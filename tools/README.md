@@ -79,6 +79,26 @@ Si alguna vez SÍ quieres que el "2027" entre al gráfico, corre sin ese
 flag una vez (o agrega la columna a mano en el rango del gráfico, en
 Excel).
 
+### Ejes de categoría de dos niveles (`<c:multiLvlStrCache>`)
+
+Un gráfico cuyo eje de categorías usa un rango de **dos filas** (p.ej.
+`Hoja!$C$25:$AW$26`, con el año en una fila dispersa y la fecha en la
+otra, como el histórico de revisión del catastro CBC) guarda su caché
+como `<c:multiLvlStrCache>`, no como `<c:strCache>`. Antes de que esto se
+manejara explícitamente (`process_multilvl_ref_block`), el sync
+reconocía el rango de dos filas, ensanchaba el `<c:f>` correctamente,
+pero al no encontrar un `<c:strCache>`/`<c:numCache>` para reemplazar
+**insertaba uno nuevo de sobra** (leído mal, como si fuera una celda
+suelta) dejando el `<c:multiLvlStrCache>` original sin actualizar — dos
+cachés distintas conviviendo en el mismo `<c:cat>`, y la que de verdad
+dibuja el eje con el `<c:ptCount>` viejo. PowerPoint abre ese archivo
+pidiendo reparar, y tras "reparar" puede mostrar la lámina casi vacía o
+con contenido irreconocible en vez del gráfico. Si ves `(multinivel)` en
+la salida del sync, es esta rama la que corrió; si en cambio ves
+`! rango multinivel con forma inesperada`, es un rango de dos niveles
+con una forma distinta a "dos filas, muchas columnas" — revisa ese
+gráfico a mano, no lo toca.
+
 ## Tipo de Cambio Real (BIS): `update_tc_from_apis.py`
 
 Mismo patrón que `update_from_apis.py`, pero para `Gráficos_TC.xlsx` /
