@@ -179,6 +179,11 @@ def merge(a_path, b_path, out_path):
     new_defaults = [m for m in re.findall(r'<Default Extension="[^"]+" ContentType="[^"]+"/>', ct_b)
                      if re.search(r'Extension="([^"]+)"', m).group(1) not in existing_defaults]
     skip_overrides = {rename_path("/" + n, rename_map) for n in SKIP_FROM_B if n.startswith("ppt/")}
+    # partes que NO se renumeran (presentation.xml, presProps.xml, docProps/*, etc.):
+    # B declara su propio Override para la MISMA ruta que ya tiene A, así que sin
+    # este filtro quedan duplicadas (incluso con texto idéntico) — eso es XML
+    # inválido y es exactamente el tipo de cosa que Office rechaza y ofrece "reparar".
+    existing_overrides_a = set(re.findall(r'<Override PartName="([^"]+)"', ct_a))
     overrides_b = re.findall(r'<Override PartName="[^"]+" ContentType="[^"]+"/>', ct_b)
     overrides_b_renamed = []
     for ov in overrides_b:
@@ -186,6 +191,8 @@ def merge(a_path, b_path, out_path):
         if part in skip_overrides or part.lstrip("/") in SKIP_FROM_B:
             continue
         new_part = "/" + rename_path(part.lstrip("/"), rename_map)
+        if new_part in existing_overrides_a:
+            continue  # misma ruta que A (parte no renumerada): A ya la declara
         overrides_b_renamed.append(ov.replace(f'PartName="{part}"', f'PartName="{new_part}"'))
     ct_merged = ct_a.replace("</Types>", "".join(new_defaults) + "".join(overrides_b_renamed) + "</Types>")
     merged["[Content_Types].xml"] = ct_merged.encode("utf-8")

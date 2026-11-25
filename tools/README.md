@@ -99,6 +99,34 @@ la salida del sync, es esta rama la que corrió; si en cambio ves
 con una forma distinta a "dos filas, muchas columnas" — revisa ese
 gráfico a mano, no lo toca.
 
+## `merge_pptx.py`: partes sin renumerar duplicadas en `[Content_Types].xml`
+
+`presentation.xml`, `presProps.xml`, `viewProps.xml`, `tableStyles.xml` y los
+`docProps/*` de B no se renumeran (no están en `RENAME_TYPES`): viven en la
+MISMA ruta que la parte correspondiente de A. El merge de `[Content_Types].xml`
+copiaba igual el `<Override>` de B para esas rutas, aunque A ya tuviera uno
+idéntico — dos `<Override PartName="...">` para la misma parte es XML
+inválido. LibreOffice y `validate.py` lo abren igual; PowerPoint lo rechaza y
+ofrece "reparar" (y al reparar puede sustituir una lámina por algo
+irreconocible). Corregido: ahora se salta cualquier `<Override>` de B cuya
+ruta (ya renombrada) coincida con una que A ya declara.
+
+## Gráficos nativos dentro de un `.xlsx` propio: no uses `schemeClr`
+
+Cuando un gráfico vive en la MISMA presentación/tema para el que fue diseñado
+(p.ej. copiado de lámina a lámina dentro del mismo .pptx), sus colores por
+`<a:schemeClr val="accentN"/>` resuelven bien porque el archivo tiene un solo
+tema. Si ese mismo gráfico se traslada a un `.xlsx` standalone (como hace
+`merge_pptx.py`-style tooling para entregar "el Excel con los gráficos"), el
+libro nuevo trae su PROPIO `theme1.xml` (el de Excel por defecto, no el de la
+marca) — los mismos `accent1..6` ya no son los colores de Valtin, aunque se le
+agregue un `themeOverride` al gráfico (LibreOffice ni siquiera lo aplica, y no
+hay forma barata de confirmar que Excel real sí lo hace). La forma robusta de
+llevar un gráfico a un host distinto es reemplazar cada `<a:schemeClr val="X">`
+por el `<a:srgbClr val="HEX">` que le corresponde según el `<a:clrScheme>` del
+tema de origen (y su `<p:clrMap>`, para resolver `bg1`/`tx1`/`bg2`/`tx2`) —
+colores fijos, no dependen de qué tema tenga el archivo que lo abre.
+
 ## Tipo de Cambio Real (BIS): `update_tc_from_apis.py`
 
 Mismo patrón que `update_from_apis.py`, pero para `Gráficos_TC.xlsx` /
